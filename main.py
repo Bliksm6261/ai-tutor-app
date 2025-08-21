@@ -8,7 +8,7 @@ from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 import uvicorn
 
-# --- NEW: CORS Imports ---
+# --- CORS Imports ---
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- Security Imports ---
@@ -81,20 +81,17 @@ app = FastAPI(
     version="0.2.0",
 )
 
-# --- NEW: CORS Middleware Setup ---
-# This list defines which websites are allowed to make requests to your API.
-# For development, we allow all origins with "*".
-# For production, you would restrict this to your actual frontend domain.
+# --- CORS Middleware Setup ---
 origins = [
-    "*", # Allows all origins for now
+    "*",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
