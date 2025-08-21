@@ -167,12 +167,3 @@ def login_for_access_token(form_data: UserLogin):
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
 ```text
-# requirements.txt
-fastapi
-uvicorn[standard]
-psycopg2-binary
-python-dotenv
-passlib[bcrypt]
-python-jose[cryptography]
-pydantic[email]
-fastapi-cors
