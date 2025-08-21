@@ -8,21 +8,20 @@ from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 import uvicorn
 
+# --- NEW: CORS Imports ---
+from fastapi.middleware.cors import CORSMiddleware
+
 # --- Security Imports ---
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
 
 # --- Security Setup ---
-# Password Hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# JWT Configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_initial_dev") # In production, set this in your environment
+SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_initial_dev")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Load environment variables from a .env file
 load_dotenv()
 
 # --- Database Connection ---
@@ -32,25 +31,24 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = "localhost"
 
 def get_db_connection():
-    """Establishes and returns a connection to the database."""
     try:
         conn = psycopg2.connect(
             dbname=DB_NAME,
             user=DB_USER,
             password=DB_PASSWORD,
             host=DB_HOST,
-            cursor_factory=RealDictCursor # Returns rows as dictionaries
+            cursor_factory=RealDictCursor
         )
         return conn
     except psycopg2.OperationalError as e:
         print(f"Error connecting to database: {e}")
         return None
 
-# --- Pydantic Models (Data Schemas) ---
+# --- Pydantic Models ---
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
-    role: str # 'student' or 'teacher'
+    role: str
     first_name: str
     last_name: str
 
@@ -62,7 +60,7 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
-# --- Security Utility Functions ---
+# --- Security Utilities ---
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -83,15 +81,30 @@ app = FastAPI(
     version="0.2.0",
 )
 
+# --- NEW: CORS Middleware Setup ---
+# This list defines which websites are allowed to make requests to your API.
+# For development, we allow all origins with "*".
+# For production, you would restrict this to your actual frontend domain.
+origins = [
+    "*", # Allows all origins for now
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"], # Allows all headers
+)
+
+
 # --- API Endpoints ---
 @app.get("/")
 def read_root():
-    """Root endpoint that returns a welcome message."""
     return {"message": "Welcome to the AI Tutor API!"}
 
 @app.get("/db-test")
 def test_db_connection():
-    """Tests the connection to the PostgreSQL database."""
     conn = get_db_connection()
     if conn is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -105,24 +118,18 @@ def test_db_connection():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database query failed: {str(e)}")
 
-# --- NEW: User Authentication Endpoints ---
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(user: UserCreate):
-    """Registers a new user (student or teacher)."""
     hashed_password = get_password_hash(user.password)
-    
     conn = get_db_connection()
     if conn is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
-    
     try:
         cursor = conn.cursor()
-        # Check if user already exists
         cursor.execute("SELECT * FROM users WHERE email = %s", (user.email,))
         if cursor.fetchone():
             raise HTTPException(status_code=400, detail="Email already registered")
         
-        # Insert new user
         cursor.execute(
             "INSERT INTO users (email, password_hash, role, first_name, last_name) VALUES (%s, %s, %s, %s, %s) RETURNING user_id",
             (user.email, hashed_password, user.role, user.first_name, user.last_name)
@@ -137,7 +144,6 @@ def register_user(user: UserCreate):
 
 @app.post("/login", response_model=Token)
 def login_for_access_token(form_data: UserLogin):
-    """Logs in a user and returns a JWT access token."""
     conn = get_db_connection()
     if conn is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -163,7 +169,6 @@ def login_for_access_token(form_data: UserLogin):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
-
 ```text
 # requirements.txt
 fastapi
@@ -172,3 +177,5 @@ psycopg2-binary
 python-dotenv
 passlib[bcrypt]
 python-jose[cryptography]
+pydantic[email]
+fastapi-cors
