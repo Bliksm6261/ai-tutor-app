@@ -15,12 +15,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
+from fastapi.security import OAuth2PasswordBearer
 
 # --- Security Setup ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_initial_dev")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 load_dotenv()
 
@@ -59,6 +61,10 @@ class UserLogin(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    
+class TokenData(BaseModel):
+    email: str | None = None
+    user_id: int | None = None
 
 # --- Security Utilities ---
 def verify_password(plain_password, hashed_password):
@@ -74,18 +80,32 @@ def create_access_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        user_id: int = payload.get("user_id")
+        if email is None or user_id is None:
+            raise credentials_exception
+        token_data = TokenData(email=email, user_id=user_id)
+    except JWTError:
+        raise credentials_exception
+    return token_data
+
 # --- FastAPI App ---
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the AI-powered adaptive learning platform.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 # --- CORS Middleware Setup ---
-origins = [
-    "*",
-]
-
+origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -94,26 +114,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # --- API Endpoints ---
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the AI Tutor API!"}
-
-@app.get("/db-test")
-def test_db_connection():
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=500, detail="Database connection failed.")
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT version();")
-        db_version = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        return {"message": "Database connection successful!", "version": db_version['version']}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database query failed: {str(e)}")
 
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(user: UserCreate):
@@ -163,7 +167,73 @@ def login_for_access_token(form_data: UserLogin):
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
+# --- NEW: Question Fetching Endpoint ---
+@app.get("/questions/next")
+def get_next_question(current_user: TokenData = Depends(get_current_user)):
+    """
+    Gets the next question for the currently logged-in student.
+    This contains the first version of our adaptive learning logic.
+    """
+    student_id = current_user.user_id
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    try:
+        cursor = conn.cursor()
+        
+        # Logic: Find the topic with the lowest mastery score for this student.
+        # If the student has no progress yet, it will be NULL, so we start with 'trig_ratios'.
+        cursor.execute(
+            """
+            SELECT knowledge_graph_id 
+            FROM student_progress 
+            WHERE student_id = %s
+            ORDER BY mastery_score ASC 
+            LIMIT 1;
+            """,
+            (student_id,)
+        )
+        weakest_topic_row = cursor.fetchone()
+        
+        target_topic = 'trig_ratios' # Default starting topic
+        if weakest_topic_row:
+            target_topic = weakest_topic_row['knowledge_graph_id']
+
+        # Now, fetch an easy question from that topic that the user hasn't seen yet.
+        # (Note: A more advanced version would track seen questions)
+        cursor.execute(
+            """
+            SELECT question_id, question_text, difficulty
+            FROM questions
+            WHERE knowledge_graph_id = %s
+            ORDER BY difficulty ASC
+            LIMIT 1;
+            """,
+            (target_topic,)
+        )
+        question = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        if not question:
+            raise HTTPException(status_code=404, detail="No more questions found for this topic.")
+
+        return question
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not fetch question: {str(e)}")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
 ```text
+# requirements.txt
+fastapi
+uvicorn[standard]
+psycopg2-binary
+python-dotenv
+passlib[bcrypt]
+python-jose[cryptography]
+pydantic[email]
+fastapi-cors
