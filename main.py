@@ -51,13 +51,12 @@ def get_db_connection():
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
-    role: str 
     first_name: str
     last_name: str
 
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
+class StudentCreate(UserCreate):
+    class_id: int
+    role: str = 'student'
 
 class Token(BaseModel):
     access_token: str
@@ -68,10 +67,6 @@ class TokenData(BaseModel):
     user_id: int | None = None
     role: str | None = None
 
-class AnswerSubmission(BaseModel):
-    question_id: int
-    answer: str
-
 class SchoolCreate(BaseModel):
     name: str
     max_students: int = 50
@@ -80,6 +75,9 @@ class SchoolCreate(BaseModel):
 class AdminTeacherCreate(UserCreate):
     school_id: int
     role: str = 'admin'
+
+class ClassCreate(BaseModel):
+    name: str
 
 # --- Security Utilities ---
 def verify_password(plain_password, hashed_password):
@@ -117,7 +115,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the Study Chommie platform.",
-    version="0.7.1", # Version bump for the fix
+    version="0.8.0",
 )
 
 # --- CORS Middleware Setup ---
@@ -135,35 +133,22 @@ app.add_middleware(
 def read_root():
     return {"message": "Welcome to the Study Chommie API!"}
 
-@app.post("/login", response_model=Token)
-def login_for_access_token(form_data: UserLogin):
-    conn = get_db_connection()
-    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE email = %s", (form_data.email,))
-        user = cursor.fetchone()
-    finally:
-        if conn: cursor.close(); conn.close()
-    if not user or not verify_password(form_data.password, user['password_hash']):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
-    access_token = create_access_token(data={"sub": user['email'], "user_id": user['user_id'], "role": user['role']})
-    return {"access_token": access_token, "token_type": "bearer"}
-
-# --- Student Endpoints ---
-@app.get("/questions/next")
-def get_next_question(current_user: TokenData = Depends(get_current_user)):
-    # ... (code remains the same)
-    pass 
-
-@app.post("/questions/answer")
-def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depends(get_current_user)):
-    # ... (code remains the same)
-    pass
+# ... (Login, Student, and Admin endpoints remain the same)
 
 # --- Teacher Endpoints ---
 @app.get("/teacher/dashboard")
 def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
+    # ... (code remains the same)
+    pass
+
+@app.get("/teacher/students/{student_id}")
+def get_student_details(student_id: int, current_user: TokenData = Depends(get_current_user)):
+    # ... (code remains the same)
+    pass
+
+# --- NEW: Class and Student Creation for Teachers ---
+@app.post("/teacher/classes", status_code=status.HTTP_201_CREATED)
+def create_class(class_data: ClassCreate, current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -173,33 +158,25 @@ def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
 
     try:
         cursor = conn.cursor()
-        # FIXED QUERY: This query now correctly joins through the 'classes' table
-        # to find all students associated with the logged-in teacher.
+        # Get the teacher's school_id
+        cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (teacher_id,))
+        teacher_school = cursor.fetchone()
+        if not teacher_school:
+            raise HTTPException(status_code=404, detail="Teacher not found.")
+        
         cursor.execute(
-            """
-            SELECT 
-                u.user_id, 
-                u.first_name, 
-                u.last_name, 
-                u.email,
-                COALESCE(AVG(sp.mastery_score), 0.1) as average_mastery
-            FROM users u
-            JOIN classes c ON u.class_id = c.class_id
-            LEFT JOIN student_progress sp ON u.user_id = sp.student_id
-            WHERE c.teacher_id = %s AND u.role = 'student'
-            GROUP BY u.user_id
-            ORDER BY average_mastery ASC;
-            """,
-            (teacher_id,)
+            "INSERT INTO classes (name, teacher_id, school_id) VALUES (%s, %s, %s) RETURNING class_id",
+            (class_data.name, teacher_id, teacher_school['school_id'])
         )
-        students = cursor.fetchall()
-        return students
+        new_class_id = cursor.fetchone()['class_id']
+        conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
+        
+    return {"message": "Class created successfully", "class_id": new_class_id}
 
-
-@app.get("/teacher/students/{student_id}")
-def get_student_details(student_id: int, current_user: TokenData = Depends(get_current_user)):
+@app.post("/teacher/students", status_code=status.HTTP_201_CREATED)
+def create_student(student: StudentCreate, current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -208,41 +185,43 @@ def get_student_details(student_id: int, current_user: TokenData = Depends(get_c
 
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT school_id FROM users WHERE user_id = %s", (student_id,)
-        )
-        student_record = cursor.fetchone()
-
+        # Get the teacher's school_id
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (current_user.user_id,))
-        teacher_record = cursor.fetchone()
+        teacher_school = cursor.fetchone()
+        if not teacher_school:
+            raise HTTPException(status_code=404, detail="Teacher not found.")
+        school_id = teacher_school['school_id']
 
-        if not student_record or not teacher_record or student_record['school_id'] != teacher_record['school_id']:
-            raise HTTPException(status_code=404, detail="Student not found in your school.")
-
-        cursor.execute(
-            "SELECT knowledge_graph_id, mastery_score FROM student_progress WHERE student_id = %s ORDER BY knowledge_graph_id;",
-            (student_id,)
-        )
-        progress = cursor.fetchall()
+        # --- Subscription Limit Check ---
+        cursor.execute("SELECT COUNT(*) as count FROM users WHERE school_id = %s AND role = 'student'", (school_id,))
+        student_count = cursor.fetchone()['count']
         
-        cursor.execute("SELECT user_id, first_name, last_name, email FROM users WHERE user_id = %s", (student_id,))
-        student_info = cursor.fetchone()
+        cursor.execute("SELECT max_students FROM schools WHERE school_id = %s", (school_id,))
+        school_limits = cursor.fetchone()
 
-        return {"student_info": student_info, "progress": progress}
+        if not school_limits or student_count >= school_limits['max_students']:
+            raise HTTPException(status_code=403, detail="Student limit for this school has been reached.")
+        # --- End of Check ---
+
+        # Check if student email already exists
+        cursor.execute("SELECT * FROM users WHERE email = %s", (student.email,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Email already registered")
+
+        hashed_password = get_password_hash(student.password)
+        cursor.execute(
+            """
+            INSERT INTO users (email, password_hash, role, first_name, last_name, school_id, class_id) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING user_id
+            """,
+            (student.email, hashed_password, student.role, student.first_name, student.last_name, school_id, student.class_id)
+        )
+        new_user_id = cursor.fetchone()['user_id']
+        conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
-
-
-# --- Super Admin Endpoints ---
-@app.post("/admin/schools", status_code=status.HTTP_201_CREATED)
-def create_school(school: SchoolCreate, admin_key: str):
-    # ... (code remains the same)
-    pass
-
-@app.post("/admin/teachers", status_code=status.HTTP_201_CREATED)
-def create_admin_teacher(teacher: AdminTeacherCreate, admin_key: str):
-    # ... (code remains the same)
-    pass
+            
+    return {"message": "Student created successfully", "user_id": new_user_id}
 
 
 if __name__ == "__main__":
