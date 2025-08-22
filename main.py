@@ -58,6 +58,10 @@ class StudentCreate(UserCreate):
     class_id: int
     role: str = 'student'
 
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -66,6 +70,10 @@ class TokenData(BaseModel):
     email: str | None = None
     user_id: int | None = None
     role: str | None = None
+
+class AnswerSubmission(BaseModel):
+    question_id: int
+    answer: str
 
 class SchoolCreate(BaseModel):
     name: str
@@ -133,18 +141,49 @@ app.add_middleware(
 def read_root():
     return {"message": "Welcome to the Study Chommie API!"}
 
-# ... (Login, Student, and Admin endpoints remain the same)
+@app.post("/login", response_model=Token)
+def login_for_access_token(form_data: UserLogin):
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE email = %s", (form_data.email,))
+        user = cursor.fetchone()
+    finally:
+        if conn: cursor.close(); conn.close()
+    if not user or not verify_password(form_data.password, user['password_hash']):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
+    access_token = create_access_token(data={"sub": user['email'], "user_id": user['user_id'], "role": user['role']})
+    return {"access_token": access_token, "token_type": "bearer"}
 
 # --- Teacher Endpoints ---
 @app.get("/teacher/dashboard")
 def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
-    # ... (code remains the same)
-    pass
+    if current_user.role not in ['teacher', 'admin']:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-@app.get("/teacher/students/{student_id}")
-def get_student_details(student_id: int, current_user: TokenData = Depends(get_current_user)):
-    # ... (code remains the same)
-    pass
+    teacher_id = current_user.user_id
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 
+                u.user_id, u.first_name, u.last_name, u.email,
+                COALESCE(AVG(sp.mastery_score), 0.1) as average_mastery
+            FROM users u
+            JOIN classes c ON u.class_id = c.class_id
+            LEFT JOIN student_progress sp ON u.user_id = sp.student_id
+            WHERE c.teacher_id = %s AND u.role = 'student'
+            GROUP BY u.user_id ORDER BY average_mastery ASC;
+            """, (teacher_id,)
+        )
+        students = cursor.fetchall()
+        return students
+    finally:
+        if conn: cursor.close(); conn.close()
 
 # --- NEW: Class and Student Creation for Teachers ---
 @app.post("/teacher/classes", status_code=status.HTTP_201_CREATED)
@@ -158,7 +197,6 @@ def create_class(class_data: ClassCreate, current_user: TokenData = Depends(get_
 
     try:
         cursor = conn.cursor()
-        # Get the teacher's school_id
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (teacher_id,))
         teacher_school = cursor.fetchone()
         if not teacher_school:
@@ -185,14 +223,13 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
 
     try:
         cursor = conn.cursor()
-        # Get the teacher's school_id
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (current_user.user_id,))
         teacher_school = cursor.fetchone()
         if not teacher_school:
             raise HTTPException(status_code=404, detail="Teacher not found.")
         school_id = teacher_school['school_id']
 
-        # --- Subscription Limit Check ---
+        # Subscription Limit Check
         cursor.execute("SELECT COUNT(*) as count FROM users WHERE school_id = %s AND role = 'student'", (school_id,))
         student_count = cursor.fetchone()['count']
         
@@ -201,7 +238,6 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
 
         if not school_limits or student_count >= school_limits['max_students']:
             raise HTTPException(status_code=403, detail="Student limit for this school has been reached.")
-        # --- End of Check ---
 
         # Check if student email already exists
         cursor.execute("SELECT * FROM users WHERE email = %s", (student.email,))
@@ -223,6 +259,7 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
             
     return {"message": "Student created successfully", "user_id": new_user_id}
 
+# ... (Other endpoints like get_student_details, admin endpoints, etc. remain)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
