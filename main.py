@@ -66,6 +66,10 @@ class TokenData(BaseModel):
     email: str | None = None
     user_id: int | None = None
 
+class AnswerSubmission(BaseModel):
+    question_id: int
+    answer: str
+
 # --- Security Utilities ---
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -101,7 +105,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the AI-powered adaptive learning platform.",
-    version="0.3.0",
+    version="0.4.0",
 )
 
 # --- CORS Middleware Setup ---
@@ -137,11 +141,11 @@ def register_user(user: UserCreate):
         )
         new_user_id = cursor.fetchone()['user_id']
         conn.commit()
-        cursor.close()
-        conn.close()
-        return {"message": "User created successfully", "user_id": new_user_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not create user: {str(e)}")
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+    return {"message": "User created successfully", "user_id": new_user_id}
 
 @app.post("/login", response_model=Token)
 def login_for_access_token(form_data: UserLogin):
@@ -149,11 +153,14 @@ def login_for_access_token(form_data: UserLogin):
     if conn is None:
         raise HTTPException(status_code=500, detail="Database connection failed.")
     
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE email = %s", (form_data.email,))
-    user = cursor.fetchone()
-    cursor.close()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE email = %s", (form_data.email,))
+        user = cursor.fetchone()
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
 
     if not user or not verify_password(form_data.password, user['password_hash']):
         raise HTTPException(
@@ -167,13 +174,8 @@ def login_for_access_token(form_data: UserLogin):
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-# --- NEW: Question Fetching Endpoint ---
 @app.get("/questions/next")
 def get_next_question(current_user: TokenData = Depends(get_current_user)):
-    """
-    Gets the next question for the currently logged-in student.
-    This contains the first version of our adaptive learning logic.
-    """
     student_id = current_user.user_id
     conn = get_db_connection()
     if conn is None:
@@ -181,49 +183,74 @@ def get_next_question(current_user: TokenData = Depends(get_current_user)):
 
     try:
         cursor = conn.cursor()
-        
-        # Logic: Find the topic with the lowest mastery score for this student.
-        # If the student has no progress yet, it will be NULL, so we start with 'trig_ratios'.
         cursor.execute(
             """
-            SELECT knowledge_graph_id 
-            FROM student_progress 
-            WHERE student_id = %s
-            ORDER BY mastery_score ASC 
-            LIMIT 1;
-            """,
-            (student_id,)
+            SELECT knowledge_graph_id FROM student_progress 
+            WHERE student_id = %s ORDER BY mastery_score ASC LIMIT 1;
+            """, (student_id,)
         )
         weakest_topic_row = cursor.fetchone()
         
-        target_topic = 'trig_ratios' # Default starting topic
+        target_topic = 'trig_ratios'
         if weakest_topic_row:
             target_topic = weakest_topic_row['knowledge_graph_id']
 
-        # Now, fetch an easy question from that topic that the user hasn't seen yet.
-        # (Note: A more advanced version would track seen questions)
         cursor.execute(
             """
-            SELECT question_id, question_text, difficulty
-            FROM questions
-            WHERE knowledge_graph_id = %s
-            ORDER BY difficulty ASC
-            LIMIT 1;
-            """,
-            (target_topic,)
+            SELECT question_id, question_text, difficulty FROM questions
+            WHERE knowledge_graph_id = %s ORDER BY difficulty ASC LIMIT 1;
+            """, (target_topic,)
         )
         question = cursor.fetchone()
 
-        cursor.close()
-        conn.close()
-
         if not question:
             raise HTTPException(status_code=404, detail="No more questions found for this topic.")
-
         return question
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not fetch question: {str(e)}")
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
 
+# --- NEW: Answer Submission Endpoint ---
+@app.post("/questions/answer")
+def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depends(get_current_user)):
+    student_id = current_user.user_id
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    try:
+        cursor = conn.cursor()
+        # Get the correct answer and topic from the database
+        cursor.execute("SELECT answer, knowledge_graph_id FROM questions WHERE question_id = %s", (submission.question_id,))
+        question_data = cursor.fetchone()
+
+        if not question_data:
+            raise HTTPException(status_code=404, detail="Question not found.")
+
+        is_correct = submission.answer.lower().strip() == question_data['answer'].lower().strip()
+        topic_id = question_data['knowledge_graph_id']
+        
+        # Update mastery score
+        mastery_change = 0.1 if is_correct else -0.05
+        
+        # UPSERT logic: Insert a new progress record or update the existing one
+        cursor.execute(
+            """
+            INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (student_id, knowledge_graph_id)
+            DO UPDATE SET mastery_score = student_progress.mastery_score + %s;
+            """,
+            (student_id, topic_id, 0.1 + mastery_change, mastery_change)
+        )
+        conn.commit()
+        
+        return {"correct": is_correct, "correct_answer": question_data['answer']}
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
