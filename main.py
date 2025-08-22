@@ -65,6 +65,7 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     email: str | None = None
     user_id: int | None = None
+    role: str | None = None
 
 class AnswerSubmission(BaseModel):
     question_id: int
@@ -94,9 +95,10 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         user_id: int = payload.get("user_id")
-        if email is None or user_id is None:
+        role: str = payload.get("role")
+        if email is None or user_id is None or role is None:
             raise credentials_exception
-        token_data = TokenData(email=email, user_id=user_id)
+        token_data = TokenData(email=email, user_id=user_id, role=role)
     except JWTError:
         raise credentials_exception
     return token_data
@@ -105,7 +107,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the AI-powered adaptive learning platform.",
-    version="0.4.0",
+    version="0.5.0",
 )
 
 # --- CORS Middleware Setup ---
@@ -169,8 +171,9 @@ def login_for_access_token(form_data: UserLogin):
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    # UPDATED: Add role to the token
     access_token = create_access_token(
-        data={"sub": user['email'], "user_id": user['user_id']}
+        data={"sub": user['email'], "user_id": user['user_id'], "role": user['role']}
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -211,7 +214,6 @@ def get_next_question(current_user: TokenData = Depends(get_current_user)):
             cursor.close()
             conn.close()
 
-# --- NEW: Answer Submission Endpoint ---
 @app.post("/questions/answer")
 def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depends(get_current_user)):
     student_id = current_user.user_id
@@ -221,7 +223,6 @@ def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depend
 
     try:
         cursor = conn.cursor()
-        # Get the correct answer and topic from the database
         cursor.execute("SELECT answer, knowledge_graph_id FROM questions WHERE question_id = %s", (submission.question_id,))
         question_data = cursor.fetchone()
 
@@ -231,10 +232,8 @@ def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depend
         is_correct = submission.answer.lower().strip() == question_data['answer'].lower().strip()
         topic_id = question_data['knowledge_graph_id']
         
-        # Update mastery score
         mastery_change = 0.1 if is_correct else -0.05
         
-        # UPSERT logic: Insert a new progress record or update the existing one
         cursor.execute(
             """
             INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score)
@@ -247,6 +246,47 @@ def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depend
         conn.commit()
         
         return {"correct": is_correct, "correct_answer": question_data['answer']}
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+# --- NEW: Teacher Dashboard Endpoint ---
+@app.get("/teacher/dashboard")
+def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
+    """
+    Gets the list of students and their progress for the logged-in teacher.
+    """
+    if current_user.role != 'teacher':
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    teacher_id = current_user.user_id
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    try:
+        cursor = conn.cursor()
+        # This query joins the users table with the student_progress table
+        # to get all students for a teacher and their average mastery score.
+        cursor.execute(
+            """
+            SELECT 
+                u.user_id, 
+                u.first_name, 
+                u.last_name, 
+                u.email,
+                COALESCE(AVG(sp.mastery_score), 0.1) as average_mastery
+            FROM users u
+            LEFT JOIN student_progress sp ON u.user_id = sp.student_id
+            WHERE u.teacher_id = %s AND u.role = 'student'
+            GROUP BY u.user_id
+            ORDER BY average_mastery ASC;
+            """,
+            (teacher_id,)
+        )
+        students = cursor.fetchall()
+        return students
     finally:
         if conn:
             cursor.close()
