@@ -20,7 +20,7 @@ from fastapi.security import OAuth2PasswordBearer
 # --- Security Setup ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_initial_dev")
-SUPER_ADMIN_API_KEY = os.getenv("SUPER_ADMIN_API_KEY", "a_very_secret_admin_key") 
+SUPER_ADMIN_API_KEY = os.getenv("SUPER_ADMIN_API_KEY", "a_very_secret_admin_key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -65,7 +65,7 @@ class UserLogin(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
-    
+
 class TokenData(BaseModel):
     email: str | None = None
     user_id: int | None = None
@@ -123,7 +123,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the Study Chommie platform.",
-    version="0.8.0",
+    version="0.8.1", # Version bump for the fix
 )
 
 # --- CORS Middleware Setup ---
@@ -170,7 +170,7 @@ def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT 
+            SELECT
                 u.user_id, u.first_name, u.last_name, u.email,
                 COALESCE(AVG(sp.mastery_score), 0.1) as average_mastery
             FROM users u
@@ -185,7 +185,6 @@ def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
     finally:
         if conn: cursor.close(); conn.close()
 
-# --- NEW: Class and Student Creation for Teachers ---
 @app.post("/teacher/classes", status_code=status.HTTP_201_CREATED)
 def create_class(class_data: ClassCreate, current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
@@ -197,20 +196,23 @@ def create_class(class_data: ClassCreate, current_user: TokenData = Depends(get_
 
     try:
         cursor = conn.cursor()
+        # Get the teacher's school_id
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (teacher_id,))
         teacher_school = cursor.fetchone()
-        if not teacher_school:
-            raise HTTPException(status_code=404, detail="Teacher not found.")
-        
+        if not teacher_school or not teacher_school['school_id']:
+            raise HTTPException(status_code=404, detail="Teacher not found or not assigned to a school.")
+
+        school_id = teacher_school['school_id']
+
         cursor.execute(
             "INSERT INTO classes (name, teacher_id, school_id) VALUES (%s, %s, %s) RETURNING class_id",
-            (class_data.name, teacher_id, teacher_school['school_id'])
+            (class_data.name, teacher_id, school_id)
         )
         new_class_id = cursor.fetchone()['class_id']
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
-        
+
     return {"message": "Class created successfully", "class_id": new_class_id}
 
 @app.post("/teacher/students", status_code=status.HTTP_201_CREATED)
@@ -232,7 +234,7 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
         # Subscription Limit Check
         cursor.execute("SELECT COUNT(*) as count FROM users WHERE school_id = %s AND role = 'student'", (school_id,))
         student_count = cursor.fetchone()['count']
-        
+
         cursor.execute("SELECT max_students FROM schools WHERE school_id = %s", (school_id,))
         school_limits = cursor.fetchone()
 
@@ -247,7 +249,7 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
         hashed_password = get_password_hash(student.password)
         cursor.execute(
             """
-            INSERT INTO users (email, password_hash, role, first_name, last_name, school_id, class_id) 
+            INSERT INTO users (email, password_hash, role, first_name, last_name, school_id, class_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING user_id
             """,
             (student.email, hashed_password, student.role, student.first_name, student.last_name, school_id, student.class_id)
@@ -256,7 +258,7 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
-            
+
     return {"message": "Student created successfully", "user_id": new_user_id}
 
 # ... (Other endpoints like get_student_details, admin endpoints, etc. remain)
