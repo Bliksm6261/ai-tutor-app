@@ -117,7 +117,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the Study Chommie platform.",
-    version="0.7.0",
+    version="0.7.1", # Version bump for the fix
 )
 
 # --- CORS Middleware Setup ---
@@ -150,30 +150,56 @@ def login_for_access_token(form_data: UserLogin):
     access_token = create_access_token(data={"sub": user['email'], "user_id": user['user_id'], "role": user['role']})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# --- Student Endpoints (No Changes) ---
+# --- Student Endpoints ---
 @app.get("/questions/next")
 def get_next_question(current_user: TokenData = Depends(get_current_user)):
-    # ... existing code ...
-    pass
+    # ... (code remains the same)
+    pass 
 
 @app.post("/questions/answer")
 def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depends(get_current_user)):
-    # ... existing code ...
+    # ... (code remains the same)
     pass
 
 # --- Teacher Endpoints ---
 @app.get("/teacher/dashboard")
 def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
-    # ... existing code ...
-    pass
+    if current_user.role not in ['teacher', 'admin']:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-# --- NEW: Student Detail Endpoint for Teachers ---
+    teacher_id = current_user.user_id
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    try:
+        cursor = conn.cursor()
+        # FIXED QUERY: This query now correctly joins through the 'classes' table
+        # to find all students associated with the logged-in teacher.
+        cursor.execute(
+            """
+            SELECT 
+                u.user_id, 
+                u.first_name, 
+                u.last_name, 
+                u.email,
+                COALESCE(AVG(sp.mastery_score), 0.1) as average_mastery
+            FROM users u
+            JOIN classes c ON u.class_id = c.class_id
+            LEFT JOIN student_progress sp ON u.user_id = sp.student_id
+            WHERE c.teacher_id = %s AND u.role = 'student'
+            GROUP BY u.user_id
+            ORDER BY average_mastery ASC;
+            """,
+            (teacher_id,)
+        )
+        students = cursor.fetchall()
+        return students
+    finally:
+        if conn: cursor.close(); conn.close()
+
+
 @app.get("/teacher/students/{student_id}")
 def get_student_details(student_id: int, current_user: TokenData = Depends(get_current_user)):
-    """
-    Gets the detailed progress for a single student.
-    Ensures the requesting user is a teacher/admin from the same school.
-    """
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -182,12 +208,8 @@ def get_student_details(student_id: int, current_user: TokenData = Depends(get_c
 
     try:
         cursor = conn.cursor()
-        # Security check: Verify the student belongs to the teacher's school
         cursor.execute(
-            """
-            SELECT s.school_id FROM users s 
-            WHERE s.user_id = %s AND s.role = 'student'
-            """, (student_id,)
+            "SELECT school_id FROM users WHERE user_id = %s", (student_id,)
         )
         student_record = cursor.fetchone()
 
@@ -197,16 +219,12 @@ def get_student_details(student_id: int, current_user: TokenData = Depends(get_c
         if not student_record or not teacher_record or student_record['school_id'] != teacher_record['school_id']:
             raise HTTPException(status_code=404, detail="Student not found in your school.")
 
-        # Fetch detailed progress
         cursor.execute(
-            """
-            SELECT knowledge_graph_id, mastery_score FROM student_progress
-            WHERE student_id = %s ORDER BY knowledge_graph_id;
-            """, (student_id,)
+            "SELECT knowledge_graph_id, mastery_score FROM student_progress WHERE student_id = %s ORDER BY knowledge_graph_id;",
+            (student_id,)
         )
         progress = cursor.fetchall()
         
-        # Fetch student info
         cursor.execute("SELECT user_id, first_name, last_name, email FROM users WHERE user_id = %s", (student_id,))
         student_info = cursor.fetchone()
 
@@ -215,15 +233,15 @@ def get_student_details(student_id: int, current_user: TokenData = Depends(get_c
         if conn: cursor.close(); conn.close()
 
 
-# --- Super Admin Endpoints (No Changes) ---
+# --- Super Admin Endpoints ---
 @app.post("/admin/schools", status_code=status.HTTP_201_CREATED)
 def create_school(school: SchoolCreate, admin_key: str):
-    # ... existing code ...
+    # ... (code remains the same)
     pass
 
 @app.post("/admin/teachers", status_code=status.HTTP_201_CREATED)
 def create_admin_teacher(teacher: AdminTeacherCreate, admin_key: str):
-    # ... existing code ...
+    # ... (code remains the same)
     pass
 
 
