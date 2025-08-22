@@ -20,7 +20,7 @@ from fastapi.security import OAuth2PasswordBearer
 # --- Security Setup ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_initial_dev")
-SUPER_ADMIN_API_KEY = os.getenv("SUPER_ADMIN_API_KEY", "a_very_secret_admin_key")
+SUPER_ADMIN_API_KEY = os.getenv("SUPER_ADMIN_API_KEY", "a_very_secret_admin_key") 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -65,7 +65,7 @@ class UserLogin(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
-
+    
 class TokenData(BaseModel):
     email: str | None = None
     user_id: int | None = None
@@ -123,7 +123,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the Study Chommie platform.",
-    version="0.8.1", # Version bump for the fix
+    version="0.9.0", # Version bump for restored features
 )
 
 # --- CORS Middleware Setup ---
@@ -156,26 +156,61 @@ def login_for_access_token(form_data: UserLogin):
     access_token = create_access_token(data={"sub": user['email'], "user_id": user['user_id'], "role": user['role']})
     return {"access_token": access_token, "token_type": "bearer"}
 
+# --- Student Endpoints ---
+@app.get("/questions/next")
+def get_next_question(current_user: TokenData = Depends(get_current_user)):
+    student_id = current_user.user_id
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT knowledge_graph_id FROM student_progress WHERE student_id = %s ORDER BY mastery_score ASC LIMIT 1;", (student_id,))
+        weakest_topic_row = cursor.fetchone()
+        target_topic = 'trig_ratios'
+        if weakest_topic_row:
+            target_topic = weakest_topic_row['knowledge_graph_id']
+        cursor.execute("SELECT question_id, question_text, difficulty FROM questions WHERE knowledge_graph_id = %s ORDER BY difficulty ASC LIMIT 1;", (target_topic,))
+        question = cursor.fetchone()
+        if not question:
+            raise HTTPException(status_code=404, detail="No more questions found for this topic.")
+        return question
+    finally:
+        if conn: cursor.close(); conn.close()
+
+@app.post("/questions/answer")
+def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depends(get_current_user)):
+    student_id = current_user.user_id
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT answer, knowledge_graph_id FROM questions WHERE question_id = %s", (submission.question_id,))
+        question_data = cursor.fetchone()
+        if not question_data:
+            raise HTTPException(status_code=404, detail="Question not found.")
+        is_correct = submission.answer.lower().strip() == question_data['answer'].lower().strip()
+        topic_id = question_data['knowledge_graph_id']
+        mastery_change = 0.1 if is_correct else -0.05
+        cursor.execute("INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score) VALUES (%s, %s, %s) ON CONFLICT (student_id, knowledge_graph_id) DO UPDATE SET mastery_score = student_progress.mastery_score + %s;", (student_id, topic_id, 0.1 + mastery_change, mastery_change))
+        conn.commit()
+        return {"correct": is_correct, "correct_answer": question_data['answer']}
+    finally:
+        if conn: cursor.close(); conn.close()
+
 # --- Teacher Endpoints ---
 @app.get("/teacher/dashboard")
 def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
-
     teacher_id = current_user.user_id
     conn = get_db_connection()
     if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
-
     try:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT
-                u.user_id, u.first_name, u.last_name, u.email,
-                COALESCE(AVG(sp.mastery_score), 0.1) as average_mastery
-            FROM users u
-            JOIN classes c ON u.class_id = c.class_id
-            LEFT JOIN student_progress sp ON u.user_id = sp.student_id
+            SELECT u.user_id, u.first_name, u.last_name, u.email, COALESCE(AVG(sp.mastery_score), 0.1) as average_mastery
+            FROM users u JOIN classes c ON u.class_id = c.class_id LEFT JOIN student_progress sp ON u.user_id = sp.student_id
             WHERE c.teacher_id = %s AND u.role = 'student'
             GROUP BY u.user_id ORDER BY average_mastery ASC;
             """, (teacher_id,)
@@ -189,40 +224,29 @@ def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
 def create_class(class_data: ClassCreate, current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
-
     teacher_id = current_user.user_id
     conn = get_db_connection()
     if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
-
     try:
         cursor = conn.cursor()
-        # Get the teacher's school_id
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (teacher_id,))
         teacher_school = cursor.fetchone()
         if not teacher_school or not teacher_school['school_id']:
             raise HTTPException(status_code=404, detail="Teacher not found or not assigned to a school.")
-
         school_id = teacher_school['school_id']
-
-        cursor.execute(
-            "INSERT INTO classes (name, teacher_id, school_id) VALUES (%s, %s, %s) RETURNING class_id",
-            (class_data.name, teacher_id, school_id)
-        )
+        cursor.execute("INSERT INTO classes (name, teacher_id, school_id) VALUES (%s, %s, %s) RETURNING class_id", (class_data.name, teacher_id, school_id))
         new_class_id = cursor.fetchone()['class_id']
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
-
     return {"message": "Class created successfully", "class_id": new_class_id}
 
 @app.post("/teacher/students", status_code=status.HTTP_201_CREATED)
 def create_student(student: StudentCreate, current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
-
     conn = get_db_connection()
     if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
-
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (current_user.user_id,))
@@ -230,38 +254,85 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
         if not teacher_school:
             raise HTTPException(status_code=404, detail="Teacher not found.")
         school_id = teacher_school['school_id']
-
-        # Subscription Limit Check
         cursor.execute("SELECT COUNT(*) as count FROM users WHERE school_id = %s AND role = 'student'", (school_id,))
         student_count = cursor.fetchone()['count']
-
         cursor.execute("SELECT max_students FROM schools WHERE school_id = %s", (school_id,))
         school_limits = cursor.fetchone()
-
         if not school_limits or student_count >= school_limits['max_students']:
             raise HTTPException(status_code=403, detail="Student limit for this school has been reached.")
-
-        # Check if student email already exists
         cursor.execute("SELECT * FROM users WHERE email = %s", (student.email,))
         if cursor.fetchone():
             raise HTTPException(status_code=400, detail="Email already registered")
-
         hashed_password = get_password_hash(student.password)
-        cursor.execute(
-            """
-            INSERT INTO users (email, password_hash, role, first_name, last_name, school_id, class_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING user_id
-            """,
-            (student.email, hashed_password, student.role, student.first_name, student.last_name, school_id, student.class_id)
-        )
+        cursor.execute("INSERT INTO users (email, password_hash, role, first_name, last_name, school_id, class_id) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING user_id", (student.email, hashed_password, student.role, student.first_name, student.last_name, school_id, student.class_id))
         new_user_id = cursor.fetchone()['user_id']
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
-
     return {"message": "Student created successfully", "user_id": new_user_id}
 
-# ... (Other endpoints like get_student_details, admin endpoints, etc. remain)
+@app.get("/teacher/students/{student_id}")
+def get_student_details(student_id: int, current_user: TokenData = Depends(get_current_user)):
+    if current_user.role not in ['teacher', 'admin']:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (student_id,))
+        student_record = cursor.fetchone()
+        cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (current_user.user_id,))
+        teacher_record = cursor.fetchone()
+        if not student_record or not teacher_record or student_record['school_id'] != teacher_record['school_id']:
+            raise HTTPException(status_code=404, detail="Student not found in your school.")
+        cursor.execute("SELECT knowledge_graph_id, mastery_score FROM student_progress WHERE student_id = %s ORDER BY knowledge_graph_id;", (student_id,))
+        progress = cursor.fetchall()
+        cursor.execute("SELECT user_id, first_name, last_name, email FROM users WHERE user_id = %s", (student_id,))
+        student_info = cursor.fetchone()
+        return {"student_info": student_info, "progress": progress}
+    finally:
+        if conn: cursor.close(); conn.close()
+
+# --- Super Admin Endpoints ---
+@app.post("/admin/schools", status_code=status.HTTP_201_CREATED)
+def create_school(school: SchoolCreate, admin_key: str):
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO schools (name, max_students, max_teachers) VALUES (%s, %s, %s) RETURNING school_id", (school.name, school.max_students, school.max_teachers))
+        new_school_id = cursor.fetchone()['school_id']
+        conn.commit()
+    finally:
+        if conn: cursor.close(); conn.close()
+    return {"message": "School created successfully", "school_id": new_school_id}
+
+@app.post("/admin/teachers", status_code=status.HTTP_201_CREATED)
+def create_admin_teacher(teacher: AdminTeacherCreate, admin_key: str):
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    hashed_password = get_password_hash(teacher.password)
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE email = %s", (teacher.email,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Email already registered")
+        cursor.execute("SELECT COUNT(*) as count FROM users WHERE school_id = %s AND role IN ('teacher', 'admin')", (teacher.school_id,))
+        teacher_count = cursor.fetchone()['count']
+        cursor.execute("SELECT max_teachers FROM schools WHERE school_id = %s", (teacher.school_id,))
+        school_limits = cursor.fetchone()
+        if not school_limits or teacher_count >= school_limits['max_teachers']:
+            raise HTTPException(status_code=403, detail="Teacher limit for this school has been reached.")
+        cursor.execute("INSERT INTO users (email, password_hash, role, first_name, last_name, school_id) VALUES (%s, %s, %s, %s, %s, %s) RETURNING user_id", (teacher.email, hashed_password, teacher.role, teacher.first_name, teacher.last_name, teacher.school_id))
+        new_user_id = cursor.fetchone()['user_id']
+        conn.commit()
+    finally:
+        if conn: cursor.close(); conn.close()
+    return {"message": "Admin teacher created successfully", "user_id": new_user_id}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
