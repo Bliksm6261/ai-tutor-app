@@ -196,22 +196,106 @@ def get_next_question(current_user: TokenData = Depends(get_current_user)):
 def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depends(get_current_user)):
     student_id = current_user.user_id
     conn = get_db_connection()
-    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+        
     try:
         cursor = conn.cursor()
+        
+        # Get question details
         cursor.execute("SELECT answer, knowledge_graph_id FROM questions WHERE question_id = %s", (submission.question_id,))
         question_data = cursor.fetchone()
         if not question_data:
             raise HTTPException(status_code=404, detail="Question not found.")
+            
         is_correct = submission.answer.lower().strip() == question_data['answer'].lower().strip()
         topic_id = question_data['knowledge_graph_id']
-        mastery_change = 0.1 if is_correct else -0.05
-        cursor.execute("INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score) VALUES (%s, %s, %s) ON CONFLICT (student_id, knowledge_graph_id) DO UPDATE SET mastery_score = student_progress.mastery_score + %s;", (student_id, topic_id, 0.1 + mastery_change, mastery_change))
+        
+        # NEW LOGIC: Update mastery and incorrect attempts
+        if is_correct:
+            mastery_change = 0.1
+            # On a correct answer, reset incorrect attempts for this topic to 0
+            cursor.execute(
+                """
+                INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score, incorrect_attempts)
+                VALUES (%s, %s, 0.1, 0)
+                ON CONFLICT (student_id, knowledge_graph_id)
+                DO UPDATE SET
+                    mastery_score = student_progress.mastery_score + %s,
+                    incorrect_attempts = 0;
+                """,
+                (student_id, topic_id, mastery_change)
+            )
+        else:
+            mastery_change = -0.05
+            # On an incorrect answer, increment the counter
+            cursor.execute(
+                """
+                INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score, incorrect_attempts)
+                VALUES (%s, %s, 0.0, 1)
+                ON CONFLICT (student_id, knowledge_graph_id)
+                DO UPDATE SET
+                    mastery_score = student_progress.mastery_score + %s,
+                    incorrect_attempts = student_progress.incorrect_attempts + 1;
+                """,
+                (student_id, topic_id, mastery_change)
+            )
+            
         conn.commit()
-        return {"correct": is_correct, "correct_answer": question_data['answer']}
-    finally:
-        if conn: cursor.close(); conn.close()
 
+        # Fetch the new incorrect_attempts count to send to the frontend
+        cursor.execute(
+            "SELECT incorrect_attempts FROM student_progress WHERE student_id = %s AND knowledge_graph_id = %s",
+            (student_id, topic_id)
+        )
+        progress_data = cursor.fetchone()
+        incorrect_count = progress_data['incorrect_attempts'] if progress_data else 0
+        
+        return {
+            "correct": is_correct, 
+            "correct_answer": question_data['answer'],
+            "incorrect_attempts": incorrect_count
+        }
+
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+@app.get("/questions/hint/{question_id}")
+def get_hint_for_question(
+    question_id: int, 
+    level: int = Query(..., ge=1, description="The level of hint to retrieve, starting at 1"), 
+    current_user: TokenData = Depends(get_current_user) # Protects the endpoint
+):
+    """
+    Retrieves a specific level of hint for a given question.
+    A student frontend would call this with ?level=1 for the first hint, ?level=2 for the second, etc.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        
+        # Query the hints table for the specific hint
+        cursor.execute(
+            "SELECT enhanced_hint_text FROM hints WHERE question_id = %s AND hint_level = %s",
+            (question_id, level)
+        )
+        hint = cursor.fetchone()
+        
+        if not hint:
+            raise HTTPException(status_code=404, detail=f"Hint level {level} not found for this question.")
+            
+        return {"hint_text": hint['enhanced_hint_text']}
+        
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+            
 # --- Teacher Endpoints ---
 @app.get("/teacher/dashboard")
 def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
