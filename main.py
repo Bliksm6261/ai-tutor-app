@@ -616,6 +616,34 @@ def enable_school(school_id: int, admin_key: str):
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
+       
+@app.get("/api/admin/schools/all")
+def get_all_schools(admin_key: str):
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT school_id, name, is_active FROM schools ORDER BY name;")
+        schools = cursor.fetchall()
+        return schools
+    finally:
+        if conn: cursor.close(); conn.close()
+
+@app.get("/api/admin/teachers/all")
+def get_all_teachers(admin_key: str):
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, first_name, last_name, email, school_id, is_active FROM users WHERE role IN ('teacher', 'admin') ORDER BY last_name;")
+        teachers = cursor.fetchall()
+        return teachers
+    finally:
+        if conn: cursor.close(); conn.close()       
         
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
