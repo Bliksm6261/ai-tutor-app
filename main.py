@@ -505,6 +505,29 @@ def approve_question(question_id: int, admin_key: str):
         return {"message": f"Question {question_id} has been approved."}
     finally:
         if conn: cursor.close(); conn.close()
+        
+        @app.delete("/api/content/reject/{question_id}", status_code=status.HTTP_200_OK)
+def reject_question(question_id: int, admin_key: str):
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        # We delete all related hints first due to foreign key constraints
+        cursor.execute("DELETE FROM hints WHERE question_id = %s;", (question_id,))
+        # Then we delete the question itself
+        cursor.execute("DELETE FROM questions WHERE question_id = %s;", (question_id,))
+        
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Question not found or already deleted.")
+            
+        conn.commit()
+        return {"message": f"Question {question_id} and its hints have been rejected and deleted."}
+    finally:
+        if conn: cursor.close(); conn.close()
 
 @app.patch("/api/teacher/students/{student_id}/disable", status_code=status.HTTP_204_NO_CONTENT)
 def disable_student(student_id: int, current_user: TokenData = Depends(get_current_active_teacher_or_admin)):
