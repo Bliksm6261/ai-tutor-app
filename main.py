@@ -227,8 +227,12 @@ def get_next_question(current_user: TokenData = Depends(get_current_user)):
         target_topic = 'trig_ratios'
         if weakest_topic_row:
             target_topic = weakest_topic_row['knowledge_graph_id']
-        cursor.execute("SELECT question_id, question_text, difficulty FROM questions WHERE knowledge_graph_id = %s AND status = 'approved' ORDER BY difficulty ASC LIMIT 1;", (target_topic,))
+        
+        # --- BUG FIX ---
+        # Changed "ORDER BY difficulty ASC" to "ORDER BY RANDOM()" to prevent serving the same question repeatedly.
+        cursor.execute("SELECT question_id, question_text, difficulty FROM questions WHERE knowledge_graph_id = %s AND status = 'approved' ORDER BY RANDOM() LIMIT 1;", (target_topic,))
         question = cursor.fetchone()
+
         if not question:
             cursor.execute("SELECT question_id, question_text, difficulty FROM questions WHERE status = 'approved' ORDER BY RANDOM() LIMIT 1;")
             question = cursor.fetchone()
@@ -578,4 +582,4 @@ def enable_school(school_id: int, admin_key: str):
         if conn: cursor.close(); conn.close()
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000
