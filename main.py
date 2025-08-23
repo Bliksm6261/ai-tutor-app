@@ -542,5 +542,80 @@ def enable_student(student_id: int, current_user: TokenData = Depends(get_curren
     finally:
         if conn: cursor.close(); conn.close()
 
+# --- NEW: Super Admin Management Endpoints ---
+
+@app.patch("/api/admin/teachers/{teacher_id}/disable", status_code=status.HTTP_204_NO_CONTENT)
+def disable_teacher(teacher_id: int, admin_key: str):
+    """Disables a teacher or admin account. Super admin access required."""
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        # Ensure the user is actually a teacher or admin before disabling
+        cursor.execute("UPDATE users SET is_active = false WHERE user_id = %s AND role IN ('teacher', 'admin')", (teacher_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Teacher or admin user not found.")
+        conn.commit()
+    finally:
+        if conn: cursor.close(); conn.close()
+
+@app.patch("/api/admin/teachers/{teacher_id}/enable", status_code=status.HTTP_204_NO_CONTENT)
+def enable_teacher(teacher_id: int, admin_key: str):
+    """Enables a teacher or admin account. Super admin access required."""
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET is_active = true WHERE user_id = %s AND role IN ('teacher', 'admin')", (teacher_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Teacher or admin user not found.")
+        conn.commit()
+    finally:
+        if conn: cursor.close(); conn.close()
+
+@app.patch("/api/admin/schools/{school_id}/disable", status_code=status.HTTP_204_NO_CONTENT)
+def disable_school(school_id: int, admin_key: str):
+    """Disables a school account. Super admin access required."""
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE schools SET is_active = false WHERE school_id = %s", (school_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="School not found.")
+        conn.commit()
+    finally:
+        if conn: cursor.close(); conn.close()
+
+@app.patch("/api/admin/schools/{school_id}/enable", status_code=status.HTTP_204_NO_CONTENT)
+def enable_school(school_id: int, admin_key: str):
+    """Enables a school account. Super admin access required."""
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE schools SET is_active = true WHERE school_id = %s", (school_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="School not found.")
+        conn.commit()
+    finally:
+        if conn: cursor.close(); conn.close()
+        
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
