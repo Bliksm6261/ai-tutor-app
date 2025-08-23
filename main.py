@@ -86,6 +86,13 @@ class AdminTeacherCreate(UserCreate):
 
 class ClassCreate(BaseModel):
     name: str
+    
+class TeacherCreate(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    password: str
+    role: str = 'teacher'
 
 # --- Security Utilities ---
 def verify_password(plain_password, hashed_password):
@@ -118,6 +125,14 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise credentials_exception
     return token_data
+    
+def get_current_admin_user(current_user: TokenData = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to perform this action"
+        )
+    return current_user
 
 # --- FastAPI App ---
 app = FastAPI(
@@ -270,6 +285,58 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
     finally:
         if conn: cursor.close(); conn.close()
     return {"message": "Student created successfully", "user_id": new_user_id}
+    
+@app.post("/teacher/teachers", status_code=status.HTTP_201_CREATED)
+def create_teacher(teacher: TeacherCreate, current_user: TokenData = Depends(get_current_admin_user)):
+    # Note: We use get_current_admin_user to protect this route
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        
+        # 1. Get the admin's school_id
+        cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (current_user.user_id,))
+        admin_record = cursor.fetchone()
+        if not admin_record:
+            raise HTTPException(status_code=404, detail="Admin user not found.")
+        school_id = admin_record['school_id']
+
+        # 2. Check school's teacher limit (using your schema's max_teachers column)
+        cursor.execute("SELECT max_teachers FROM schools WHERE school_id = %s", (school_id,))
+        school_limits = cursor.fetchone()
+        
+        cursor.execute("SELECT COUNT(*) as count FROM users WHERE school_id = %s AND role IN ('teacher', 'admin')", (school_id,))
+        teacher_count = cursor.fetchone()['count']
+        
+        if not school_limits or teacher_count >= school_limits['max_teachers']:
+            raise HTTPException(status_code=403, detail="Teacher limit for this school has been reached.")
+
+        # 3. Check if email already exists
+        cursor.execute("SELECT * FROM users WHERE email = %s", (teacher.email,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Email already registered")
+
+        # 4. Create the new teacher user
+        hashed_password = get_password_hash(teacher.password)
+        cursor.execute(
+            """
+            INSERT INTO users (email, password_hash, role, first_name, last_name, school_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING user_id
+            """,
+            (teacher.email, hashed_password, teacher.role, teacher.first_name, teacher.last_name, school_id)
+        )
+        new_user_id = cursor.fetchone()['user_id']
+        conn.commit()
+        
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+            
+    return {"message": "Teacher created successfully", "user_id": new_user_id}
 
 @app.get("/teacher/students/{student_id}")
 def get_student_details(student_id: int, current_user: TokenData = Depends(get_current_user)):
