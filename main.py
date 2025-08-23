@@ -23,7 +23,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_initial_dev")
 SUPER_ADMIN_API_KEY = os.getenv("SUPER_ADMIN_API_KEY", "a_very_secret_admin_key") 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 
 load_dotenv()
 
@@ -169,7 +169,7 @@ app.add_middleware(
 def read_root():
     return {"message": "Welcome to the Study Chommie API!"}
 
-@app.post("/login", response_model=Token)
+@app.post("/api/login", response_model=Token)
 def login_for_access_token(form_data: UserLogin):
     conn = get_db_connection()
     if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
@@ -185,7 +185,7 @@ def login_for_access_token(form_data: UserLogin):
     return {"access_token": access_token, "token_type": "bearer"}
 
 # --- Student Endpoints ---
-@app.get("/questions/next")
+@app.get("/api/questions/next")
 def get_next_question(current_user: TokenData = Depends(get_current_user)):
     student_id = current_user.user_id
     conn = get_db_connection()
@@ -205,7 +205,7 @@ def get_next_question(current_user: TokenData = Depends(get_current_user)):
     finally:
         if conn: cursor.close(); conn.close()
 
-@app.post("/questions/answer")
+@app.post("/api/questions/answer")
 def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depends(get_current_user)):
     student_id = current_user.user_id
     conn = get_db_connection()
@@ -275,7 +275,7 @@ def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depend
             cursor.close()
             conn.close()
 
-@app.get("/questions/hint/{question_id}")
+@app.get("/api/questions/hint/{question_id}")
 def get_hint_for_question(
     question_id: int, 
     level: int = Query(..., ge=1, description="The level of hint to retrieve, starting at 1"), 
@@ -310,7 +310,7 @@ def get_hint_for_question(
             conn.close()
             
 # --- Teacher Endpoints ---
-@app.get("/teacher/dashboard")
+@app.get("/api/teacher/dashboard")
 def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -332,7 +332,7 @@ def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
     finally:
         if conn: cursor.close(); conn.close()
 
-@app.post("/teacher/classes", status_code=status.HTTP_201_CREATED)
+@app.post("/api/teacher/classes", status_code=status.HTTP_201_CREATED)
 def create_class(class_data: ClassCreate, current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -353,7 +353,7 @@ def create_class(class_data: ClassCreate, current_user: TokenData = Depends(get_
         if conn: cursor.close(); conn.close()
     return {"message": "Class created successfully", "class_id": new_class_id}
 
-@app.post("/teacher/students", status_code=status.HTTP_201_CREATED)
+@app.post("/api/teacher/students", status_code=status.HTTP_201_CREATED)
 def create_student(student: StudentCreate, current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -383,7 +383,7 @@ def create_student(student: StudentCreate, current_user: TokenData = Depends(get
         if conn: cursor.close(); conn.close()
     return {"message": "Student created successfully", "user_id": new_user_id}
     
-@app.post("/teacher/teachers", status_code=status.HTTP_201_CREATED)
+@app.post("/api/teacher/teachers", status_code=status.HTTP_201_CREATED)
 def create_teacher(teacher: TeacherCreate, current_user: TokenData = Depends(get_current_admin_user)):
     # Note: We use get_current_admin_user to protect this route
     conn = get_db_connection()
@@ -435,7 +435,7 @@ def create_teacher(teacher: TeacherCreate, current_user: TokenData = Depends(get
             
     return {"message": "Teacher created successfully", "user_id": new_user_id}
 
-@app.get("/teacher/students/{student_id}")
+@app.get("/api/teacher/students/{student_id}")
 def get_student_details(student_id: int, current_user: TokenData = Depends(get_current_user)):
     if current_user.role not in ['teacher', 'admin']:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -458,7 +458,7 @@ def get_student_details(student_id: int, current_user: TokenData = Depends(get_c
         if conn: cursor.close(); conn.close()
 
 # --- Super Admin Endpoints ---
-@app.post("/admin/schools", status_code=status.HTTP_201_CREATED)
+@app.post("/api/admin/schools", status_code=status.HTTP_201_CREATED)
 def create_school(school: SchoolCreate, admin_key: str):
     if admin_key != SUPER_ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -473,7 +473,7 @@ def create_school(school: SchoolCreate, admin_key: str):
         if conn: cursor.close(); conn.close()
     return {"message": "School created successfully", "school_id": new_school_id}
 
-@app.post("/admin/teachers", status_code=status.HTTP_201_CREATED)
+@app.post("/api/admin/teachers", status_code=status.HTTP_201_CREATED)
 def create_admin_teacher(teacher: AdminTeacherCreate, admin_key: str):
     if admin_key != SUPER_ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -501,7 +501,7 @@ def create_admin_teacher(teacher: AdminTeacherCreate, admin_key: str):
 
 # --- Content Management Endpoints ---
 
-@app.get("/content/review", response_model=list[QuestionForReview])
+@app.get("/api/content/review", response_model=list[QuestionForReview])
 def get_questions_for_review(admin_key: str):
     if admin_key != SUPER_ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -528,7 +528,7 @@ def get_questions_for_review(admin_key: str):
         if conn: cursor.close(); conn.close()
 
 
-@app.post("/content/approve/{question_id}", status_code=status.HTTP_200_OK)
+@app.post("/api/content/approve/{question_id}", status_code=status.HTTP_200_OK)
 def approve_question(question_id: int, admin_key: str):
     if admin_key != SUPER_ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Not authorized")
