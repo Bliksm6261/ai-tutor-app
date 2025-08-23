@@ -582,4 +582,4 @@ def enable_school(school_id: int, admin_key: str):
         if conn: cursor.close(); conn.close()
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000
+    uvicorn.run(app, host="127.0.0.1", port=8000) 
