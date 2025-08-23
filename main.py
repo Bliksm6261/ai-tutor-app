@@ -93,6 +93,19 @@ class TeacherCreate(BaseModel):
     email: EmailStr
     password: str
     role: str = 'teacher'
+    
+class HintResponse(BaseModel):
+    hint_level: int
+    raw_hint_text: str | None = None
+    enhanced_hint_text: str | None = None
+
+class QuestionForReview(BaseModel):
+    question_id: int
+    raw_question_text: str | None = None
+    question_text: str
+    answer: str
+    status: str
+    hints: list[HintResponse]
 
 # --- Security Utilities ---
 def verify_password(plain_password, hashed_password):
@@ -484,6 +497,57 @@ def create_admin_teacher(teacher: AdminTeacherCreate, admin_key: str):
     finally:
         if conn: cursor.close(); conn.close()
     return {"message": "Admin teacher created successfully", "user_id": new_user_id}
+
+
+# --- Content Management Endpoints ---
+
+@app.get("/content/review", response_model=list[QuestionForReview])
+def get_questions_for_review(admin_key: str):
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        # Fetch all questions pending review
+        cursor.execute("SELECT * FROM questions WHERE status = 'pending_review' ORDER BY question_id;")
+        questions = cursor.fetchall()
+        
+        results = []
+        for q in questions:
+            # For each question, fetch its associated hints
+            cursor.execute("SELECT hint_level, raw_hint_text, enhanced_hint_text FROM hints WHERE question_id = %s ORDER BY hint_level;", (q['question_id'],))
+            hints = cursor.fetchall()
+            q['hints'] = hints # Attach hints to the question dictionary
+            results.append(q)
+            
+        return results
+    finally:
+        if conn: cursor.close(); conn.close()
+
+
+@app.post("/content/approve/{question_id}", status_code=status.HTTP_200_OK)
+def approve_question(question_id: int, admin_key: str):
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        # Update the question's status to 'approved'
+        cursor.execute("UPDATE questions SET status = 'approved' WHERE question_id = %s;", (question_id,))
+        
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Question not found.")
+            
+        conn.commit()
+        return {"message": f"Question {question_id} has been approved."}
+    finally:
+        if conn: cursor.close(); conn.close()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
