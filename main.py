@@ -3,7 +3,7 @@
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi import FastAPI, Query, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 import uvicorn
