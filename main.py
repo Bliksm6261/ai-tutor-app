@@ -15,7 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+# MODIFIED: Removed OAuth2PasswordRequestForm as it's not used
+from fastapi.security import OAuth2PasswordBearer 
 
 # --- Security Setup ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -57,6 +58,11 @@ class UserCreate(BaseModel):
 class StudentCreate(UserCreate):
     class_id: int
     role: str = 'student'
+
+# NEW: Re-added UserLogin model for the /login endpoint
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
 
 class Token(BaseModel):
     access_token: str
@@ -155,7 +161,7 @@ def get_current_active_teacher_or_admin(current_user: TokenData = Depends(get_cu
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the Study Chommie platform.",
-    version="0.9.1",
+    version="0.9.2", # Version bump for login fix
 )
 
 origins = ["*"]
@@ -172,8 +178,10 @@ app.add_middleware(
 def read_root():
     return {"message": "Welcome to the Study Chommie API!"}
 
+# --- CORRECTED LOGIN ENDPOINT ---
+# Changed the function signature back to use the UserLogin Pydantic model
 @app.post("/api/login", response_model=Token)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+def login_for_access_token(user_credentials: UserLogin):
     conn = get_db_connection()
     if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
     
@@ -182,10 +190,10 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     try:
         cursor = conn.cursor()
         
-        cursor.execute("SELECT * FROM users WHERE email = %s", (form_data.username,))
+        cursor.execute("SELECT * FROM users WHERE email = %s", (user_credentials.email,))
         user = cursor.fetchone()
         
-        if not user or not verify_password(form_data.password, user['password_hash']):
+        if not user or not verify_password(user_credentials.password, user['password_hash']):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
         if not user['is_active']:
@@ -210,6 +218,8 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = create_access_token(data={"sub": user['email'], "user_id": user['user_id'], "role": user['role']})
     return {"access_token": access_token, "token_type": "bearer"}
 
+# --- (The rest of your endpoints remain the same) ---
+
 @app.get("/api/questions/next")
 def get_next_question(current_user: TokenData = Depends(get_current_user)):
     student_id = current_user.user_id
@@ -222,10 +232,14 @@ def get_next_question(current_user: TokenData = Depends(get_current_user)):
         target_topic = 'trig_ratios'
         if weakest_topic_row:
             target_topic = weakest_topic_row['knowledge_graph_id']
-        cursor.execute("SELECT question_id, question_text, difficulty FROM questions WHERE knowledge_graph_id = %s ORDER BY difficulty ASC LIMIT 1;", (target_topic,))
+        cursor.execute("SELECT question_id, question_text, difficulty FROM questions WHERE knowledge_graph_id = %s AND status = 'approved' ORDER BY difficulty ASC LIMIT 1;", (target_topic,))
         question = cursor.fetchone()
         if not question:
-            raise HTTPException(status_code=404, detail="No more questions found for this topic.")
+            # Fallback to any approved question if the target topic has none
+            cursor.execute("SELECT question_id, question_text, difficulty FROM questions WHERE status = 'approved' ORDER BY RANDOM() LIMIT 1;")
+            question = cursor.fetchone()
+            if not question:
+                 raise HTTPException(status_code=404, detail="No approved questions are available in the system.")
         return question
     finally:
         if conn: cursor.close(); conn.close()
@@ -252,7 +266,7 @@ def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depend
                 """
                 INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score, incorrect_attempts)
                 VALUES (%s, %s, 0.1, 0) ON CONFLICT (student_id, knowledge_graph_id) DO UPDATE SET
-                mastery_score = student_progress.mastery_score + %s, incorrect_attempts = 0;
+                mastery_score = LEAST(1.0, student_progress.mastery_score + %s), incorrect_attempts = 0;
                 """,
                 (student_id, topic_id, mastery_change)
             )
@@ -262,7 +276,7 @@ def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depend
                 """
                 INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score, incorrect_attempts)
                 VALUES (%s, %s, 0.0, 1) ON CONFLICT (student_id, knowledge_graph_id) DO UPDATE SET
-                mastery_score = student_progress.mastery_score + %s, incorrect_attempts = student_progress.incorrect_attempts + 1;
+                mastery_score = GREATEST(0.0, student_progress.mastery_score + %s), incorrect_attempts = student_progress.incorrect_attempts + 1;
                 """,
                 (student_id, topic_id, mastery_change)
             )
@@ -302,10 +316,13 @@ def get_teacher_dashboard(current_user: TokenData = Depends(get_current_user)):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT u.user_id, u.first_name, u.last_name, u.email, u.is_active, COALESCE(AVG(sp.mastery_score), 0.1) as average_mastery
-            FROM users u JOIN classes c ON u.class_id = c.class_id LEFT JOIN student_progress sp ON u.user_id = sp.student_id
+            SELECT u.user_id, u.first_name, u.last_name, u.email, u.is_active, COALESCE(AVG(sp.mastery_score), 0.0) as average_mastery
+            FROM users u 
+            JOIN classes c ON u.class_id = c.class_id 
+            LEFT JOIN student_progress sp ON u.user_id = sp.student_id
             WHERE c.teacher_id = %s AND u.role = 'student'
-            GROUP BY u.user_id ORDER BY average_mastery ASC;
+            GROUP BY u.user_id 
+            ORDER BY u.last_name ASC;
             """, (teacher_id,)
         )
         students = cursor.fetchall()
