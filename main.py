@@ -638,5 +638,80 @@ def reset_student_password(student_id: int, password_data: PasswordReset, curren
     finally:
         if conn: cursor.close(); conn.close()
 
+@app.get("/api/admin/usage/summary")
+def get_usage_summary(admin_key: str):
+    """Provides a high-level summary of platform usage."""
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        
+        # Total questions answered in the last 30 days
+        cursor.execute("""
+            SELECT COUNT(*) as count 
+            FROM activity_log 
+            WHERE activity_type = 'question_answered' AND timestamp >= NOW() - INTERVAL '30 days';
+        """)
+        questions_answered = cursor.fetchone()['count']
+        
+        # Total logins in the last 30 days
+        cursor.execute("""
+            SELECT COUNT(*) as count 
+            FROM activity_log 
+            WHERE activity_type = 'login' AND timestamp >= NOW() - INTERVAL '30 days';
+        """)
+        logins = cursor.fetchone()['count']
+
+        # Total active students
+        cursor.execute("SELECT COUNT(*) as count FROM users WHERE role = 'student' AND is_active = true;")
+        active_students = cursor.fetchone()['count']
+
+        return {
+            "questions_answered_last_30_days": questions_answered,
+            "logins_last_30_days": logins,
+            "active_students": active_students
+        }
+    finally:
+        if conn: cursor.close(); conn.close()
+
+@app.get("/api/admin/usage/schools")
+def get_school_usage(admin_key: str):
+    """Provides a breakdown of usage statistics per school for the last 30 days."""
+    if admin_key != SUPER_ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        
+        # This single, more advanced query gets all the data we need
+        cursor.execute("""
+            SELECT 
+                s.school_id,
+                s.name,
+                s.is_active,
+                COUNT(DISTINCT a.user_id) FILTER (WHERE a.activity_type = 'login' AND a.timestamp >= NOW() - INTERVAL '30 days') as active_users_last_30_days,
+                COUNT(*) FILTER (WHERE a.activity_type = 'question_answered' AND a.timestamp >= NOW() - INTERVAL '30 days') as questions_answered_last_30_days
+            FROM 
+                schools s
+            LEFT JOIN 
+                activity_log a ON s.school_id = a.school_id
+            GROUP BY 
+                s.school_id, s.name, s.is_active
+            ORDER BY 
+                questions_answered_last_30_days DESC;
+        """)
+        school_stats = cursor.fetchall()
+        
+        return school_stats
+    finally:
+        if conn: cursor.close(); conn.close()
+
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
