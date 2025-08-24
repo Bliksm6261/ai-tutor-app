@@ -65,6 +65,13 @@ class UserLogin(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    password_change_required: bool
+    
+class PasswordSet(BaseModel):
+    new_password: str = Field(..., min_length=8)
+    
+class PasswordReset(BaseModel):
+    new_password: str = Field(..., min_length=8)
     
 class TokenData(BaseModel):
     email: str | None = None
@@ -159,7 +166,7 @@ def get_current_active_teacher_or_admin(current_user: TokenData = Depends(get_cu
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the Study Chommie platform.",
-    version="0.9.3", # Version bump for review portal fix
+    version="1.0.0", # Version bump for password management
 )
 
 origins = ["*"]
@@ -176,6 +183,7 @@ app.add_middleware(
 def read_root():
     return {"message": "Welcome to the Study Chommie API!"}
 
+# MODIFIED: /login endpoint now returns password_change_required flag
 @app.post("/api/login", response_model=Token)
 def login_for_access_token(user_credentials: UserLogin):
     conn = get_db_connection()
@@ -212,8 +220,12 @@ def login_for_access_token(user_credentials: UserLogin):
             conn.close()
 
     access_token = create_access_token(data={"sub": user['email'], "user_id": user['user_id'], "role": user['role']})
-    return {"access_token": access_token, "token_type": "bearer"}
-
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "password_change_required": user['password_change_required']
+    }
+    
 # ... (All your other endpoints from questions to admin teachers)
 @app.get("/api/questions/next")
 def get_next_question(current_user: TokenData = Depends(get_current_user)):
@@ -577,6 +589,64 @@ def enable_school(school_id: int, admin_key: str):
         cursor = conn.cursor()
         cursor.execute("UPDATE schools SET is_active = true WHERE school_id = %s", (school_id,))
         if cursor.rowcount == 0: raise HTTPException(status_code=404, detail="School not found.")
+        conn.commit()
+    finally:
+        if conn: cursor.close(); conn.close()
+        
+# --- NEW: Password Management Endpoints ---
+
+@app.post("/api/users/me/set-password", status_code=status.HTTP_204_NO_CONTENT)
+def set_initial_password(
+    password_data: PasswordSet,
+    current_user: TokenData = Depends(get_current_user)
+):
+    """Allows a logged-in user to set their password for the first time."""
+    hashed_password = get_password_hash(password_data.new_password)
+    
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET password_hash = %s, password_change_required = false WHERE user_id = %s",
+            (hashed_password, current_user.user_id)
+        )
+        conn.commit()
+    finally:
+        if conn: cursor.close(); conn.close()
+
+@app.patch("/api/teacher/students/{student_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+def reset_student_password(
+    student_id: int,
+    password_data: PasswordReset,
+    current_user: TokenData = Depends(get_current_active_teacher_or_admin)
+):
+    """Allows a teacher or admin to reset a student's password."""
+    conn = get_db_connection()
+    if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
+    
+    try:
+        cursor = conn.cursor()
+        
+        # Verify student is in the same school
+        cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (student_id,))
+        student = cursor.fetchone()
+        if not student:
+            raise HTTPException(status_code=404, detail="Student not found")
+        
+        cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (current_user.user_id,))
+        teacher = cursor.fetchone()
+
+        if student['school_id'] != teacher['school_id']:
+            raise HTTPException(status_code=403, detail="Not authorized to manage this student")
+        
+        # Set new password and require change on next login
+        hashed_password = get_password_hash(password_data.new_password)
+        cursor.execute(
+            "UPDATE users SET password_hash = %s, password_change_required = true WHERE user_id = %s",
+            (hashed_password, student_id)
+        )
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
