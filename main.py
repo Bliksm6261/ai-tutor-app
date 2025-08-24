@@ -2,7 +2,7 @@
 
 import os
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 from fastapi import FastAPI, Query, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from dotenv import load_dotenv
@@ -66,10 +66,10 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     password_change_required: bool
-    
+
 class PasswordSet(BaseModel):
     new_password: str = Field(..., min_length=8)
-    
+
 class PasswordReset(BaseModel):
     new_password: str = Field(..., min_length=8)
     
@@ -166,7 +166,7 @@ def get_current_active_teacher_or_admin(current_user: TokenData = Depends(get_cu
 app = FastAPI(
     title="AI Tutor API",
     description="The backend API for the Study Chommie platform.",
-    version="1.0.0", # Version bump for password management
+    version="1.1.0", # Version bump for analytics
 )
 
 origins = ["*"]
@@ -183,7 +183,6 @@ app.add_middleware(
 def read_root():
     return {"message": "Welcome to the Study Chommie API!"}
 
-# MODIFIED: /login endpoint now returns password_change_required flag
 @app.post("/api/login", response_model=Token)
 def login_for_access_token(user_credentials: UserLogin):
     conn = get_db_connection()
@@ -201,18 +200,22 @@ def login_for_access_token(user_credentials: UserLogin):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
         if not user['is_active']:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your account has been disabled. Please contact your teacher or administrator."
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your account has been disabled.")
 
         cursor.execute("SELECT is_active FROM schools WHERE school_id = %s", (user['school_id'],))
         school = cursor.fetchone()
         if not school or not school['is_active']:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your school's account has been disabled."
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your school's account has been disabled.")
+
+        # --- NEW: Log successful login activity ---
+        cursor.execute(
+            """
+            INSERT INTO activity_log (user_id, school_id, activity_type, details)
+            VALUES (%s, %s, 'login', %s)
+            """,
+            (user['user_id'], user['school_id'], Json({"role": user['role']}))
+        )
+        conn.commit()
             
     finally:
         if conn: 
@@ -225,8 +228,8 @@ def login_for_access_token(user_credentials: UserLogin):
         "token_type": "bearer",
         "password_change_required": user['password_change_required']
     }
-    
-# ... (All your other endpoints from questions to admin teachers)
+
+# --- Student Endpoints ---
 @app.get("/api/questions/next")
 def get_next_question(current_user: TokenData = Depends(get_current_user)):
     student_id = current_user.user_id
@@ -240,8 +243,6 @@ def get_next_question(current_user: TokenData = Depends(get_current_user)):
         if weakest_topic_row:
             target_topic = weakest_topic_row['knowledge_graph_id']
         
-        # --- BUG FIX ---
-        # Changed "ORDER BY difficulty ASC" to "ORDER BY RANDOM()" to prevent serving the same question repeatedly.
         cursor.execute("SELECT question_id, question_text, difficulty FROM questions WHERE knowledge_graph_id = %s AND status = 'approved' ORDER BY RANDOM() LIMIT 1;", (target_topic,))
         question = cursor.fetchone()
 
@@ -266,12 +267,25 @@ def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depend
         if not question_data: raise HTTPException(status_code=404, detail="Question not found.")
         is_correct = submission.answer.lower().strip() == question_data['answer'].lower().strip()
         topic_id = question_data['knowledge_graph_id']
+        
         if is_correct:
             mastery_change = 0.1
             cursor.execute("INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score, incorrect_attempts) VALUES (%s, %s, 0.1, 0) ON CONFLICT (student_id, knowledge_graph_id) DO UPDATE SET mastery_score = LEAST(1.0, student_progress.mastery_score + %s), incorrect_attempts = 0;",(student_id, topic_id, mastery_change))
         else:
             mastery_change = -0.05
             cursor.execute("INSERT INTO student_progress (student_id, knowledge_graph_id, mastery_score, incorrect_attempts) VALUES (%s, %s, 0.0, 1) ON CONFLICT (student_id, knowledge_graph_id) DO UPDATE SET mastery_score = GREATEST(0.0, student_progress.mastery_score + %s), incorrect_attempts = student_progress.incorrect_attempts + 1;",(student_id, topic_id, mastery_change))
+        
+        # --- NEW: Log question answered activity ---
+        cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (student_id,))
+        user_school = cursor.fetchone()
+        cursor.execute(
+            """
+            INSERT INTO activity_log (user_id, school_id, activity_type, details)
+            VALUES (%s, %s, 'question_answered', %s)
+            """,
+            (student_id, user_school['school_id'], Json({"question_id": submission.question_id, "correct": is_correct}))
+        )
+        
         conn.commit()
         cursor.execute("SELECT incorrect_attempts FROM student_progress WHERE student_id = %s AND knowledge_graph_id = %s", (student_id, topic_id))
         progress_data = cursor.fetchone()
@@ -280,6 +294,7 @@ def submit_answer(submission: AnswerSubmission, current_user: TokenData = Depend
     finally:
         if conn: cursor.close(); conn.close()
 
+# ... (The rest of your file remains the same)
 @app.get("/api/questions/hint/{question_id}")
 def get_hint_for_question(question_id: int, level: int = Query(..., ge=1), current_user: TokenData = Depends(get_current_user)):
     conn = get_db_connection()
@@ -491,7 +506,7 @@ def disable_student(student_id: int, current_user: TokenData = Depends(get_curre
         teacher_record = cursor.fetchone()
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (student_id,))
         student_record = cursor.fetchone()
-        if not student_record: raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+        if not student_record: raise HTTPException(status_code=404, detail="Student not found")
         if not teacher_record or teacher_record['school_id'] != student_record['school_id']: raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to manage this student")
         cursor.execute("UPDATE users SET is_active = false WHERE user_id = %s", (student_id,))
         conn.commit()
@@ -508,7 +523,7 @@ def enable_student(student_id: int, current_user: TokenData = Depends(get_curren
         teacher_record = cursor.fetchone()
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (student_id,))
         student_record = cursor.fetchone()
-        if not student_record: raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
+        if not student_record: raise HTTPException(status_code=404, detail="Student not found")
         if not teacher_record or teacher_record['school_id'] != student_record['school_id']: raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to manage this student")
         cursor.execute("UPDATE users SET is_active = true WHERE user_id = %s", (student_id,))
         conn.commit()
@@ -592,64 +607,36 @@ def enable_school(school_id: int, admin_key: str):
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
-        
-# --- NEW: Password Management Endpoints ---
 
 @app.post("/api/users/me/set-password", status_code=status.HTTP_204_NO_CONTENT)
-def set_initial_password(
-    password_data: PasswordSet,
-    current_user: TokenData = Depends(get_current_user)
-):
-    """Allows a logged-in user to set their password for the first time."""
+def set_initial_password(password_data: PasswordSet, current_user: TokenData = Depends(get_current_user)):
     hashed_password = get_password_hash(password_data.new_password)
-    
     conn = get_db_connection()
     if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
-    
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET password_hash = %s, password_change_required = false WHERE user_id = %s",
-            (hashed_password, current_user.user_id)
-        )
+        cursor.execute("UPDATE users SET password_hash = %s, password_change_required = false WHERE user_id = %s", (hashed_password, current_user.user_id))
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
 
 @app.patch("/api/teacher/students/{student_id}/reset-password", status_code=status.HTTP_204_NO_CONTENT)
-def reset_student_password(
-    student_id: int,
-    password_data: PasswordReset,
-    current_user: TokenData = Depends(get_current_active_teacher_or_admin)
-):
-    """Allows a teacher or admin to reset a student's password."""
+def reset_student_password(student_id: int, password_data: PasswordReset, current_user: TokenData = Depends(get_current_active_teacher_or_admin)):
     conn = get_db_connection()
     if conn is None: raise HTTPException(status_code=500, detail="Database connection failed.")
-    
     try:
         cursor = conn.cursor()
-        
-        # Verify student is in the same school
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (student_id,))
         student = cursor.fetchone()
-        if not student:
-            raise HTTPException(status_code=404, detail="Student not found")
-        
+        if not student: raise HTTPException(status_code=404, detail="Student not found")
         cursor.execute("SELECT school_id FROM users WHERE user_id = %s", (current_user.user_id,))
         teacher = cursor.fetchone()
-
-        if student['school_id'] != teacher['school_id']:
-            raise HTTPException(status_code=403, detail="Not authorized to manage this student")
-        
-        # Set new password and require change on next login
+        if student['school_id'] != teacher['school_id']: raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to manage this student")
         hashed_password = get_password_hash(password_data.new_password)
-        cursor.execute(
-            "UPDATE users SET password_hash = %s, password_change_required = true WHERE user_id = %s",
-            (hashed_password, student_id)
-        )
+        cursor.execute("UPDATE users SET password_hash = %s, password_change_required = true WHERE user_id = %s", (hashed_password, student_id))
         conn.commit()
     finally:
         if conn: cursor.close(); conn.close()
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000) 
+    uvicorn.run(app, host="127.0.0.1", port=8000)
